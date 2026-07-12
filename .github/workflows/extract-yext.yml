@@ -1,17 +1,19 @@
 name: Extract 7 Brew Yext dates
 
-# PR run created to recover the official embedded dates without a local laptop.
+# PR run created to recover and freeze the official embedded dates without a local laptop.
 on:
   workflow_dispatch:
   push:
     branches: [main]
     paths:
       - scripts/extract_yext_dates.py
+      - scripts/archive_yext_pages.py
       - .github/workflows/extract-yext.yml
   pull_request:
     branches: [main]
     paths:
       - scripts/extract_yext_dates.py
+      - scripts/archive_yext_pages.py
       - .github/workflows/extract-yext.yml
 
 permissions:
@@ -32,11 +34,15 @@ jobs:
           python-version: "3.12"
       - name: Crawl official Yext pages and decode embedded fields
         run: python scripts/extract_yext_dates.py
-      - name: Upload evidence outputs
+      - name: Freeze all 88 raw stand pages
+        run: python scripts/archive_yext_pages.py outputs/7brew_al_fl_yext_dates.csv
+      - name: Upload parsed evidence and raw snapshots
         uses: actions/upload-artifact@v4
         with:
-          name: 7brew-yext-dates-${{ github.run_id }}
-          path: outputs/
+          name: 7brew-yext-evidence-${{ github.run_id }}
+          path: |
+            outputs/
+            raw_yext_pages/
           if-no-files-found: error
           retention-days: 30
       - name: Commit extracted dates
