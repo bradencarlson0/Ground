@@ -1,15 +1,12 @@
 name: Research 36 supplemental 7 Brew opening sources
 
-# Triggered after the base branch enabled pull_request execution.
 on:
   workflow_dispatch:
-  pull_request:
+  push:
     branches: [main]
     paths:
-      - data/7brew_field_absent_36.csv
-      - scripts/research_36_openings.py
       - .github/workflows/research-36-openings.yml
-  push:
+  pull_request:
     branches: [main]
     paths:
       - data/7brew_field_absent_36.csv
@@ -29,6 +26,8 @@ jobs:
     timeout-minutes: 70
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: run-yext-extractor
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
