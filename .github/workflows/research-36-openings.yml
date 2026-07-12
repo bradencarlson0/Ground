@@ -6,12 +6,18 @@ on:
     branches: [main]
     paths:
       - .github/workflows/research-36-openings.yml
+  pull_request:
+    branches: [main]
+    paths:
+      - data/7brew_field_absent_36.csv
+      - scripts/research_36_openings.py
+      - .github/workflows/research-36-openings.yml
 
 permissions:
   contents: write
 
 concurrency:
-  group: 7brew-36-source-research-main
+  group: 7brew-36-source-research-active
   cancel-in-progress: true
 
 jobs:
@@ -38,6 +44,7 @@ jobs:
           if-no-files-found: error
           retention-days: 30
       - name: Commit research outputs to temporary branch
+        if: ${{ github.event_name != 'pull_request' }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
