@@ -1,5 +1,6 @@
 name: Extract 7 Brew Yext dates
 
+# PR run created to recover the official embedded dates without a local laptop.
 on:
   workflow_dispatch:
   push:
