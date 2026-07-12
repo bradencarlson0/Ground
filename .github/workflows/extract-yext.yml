@@ -1,0 +1,46 @@
+name: Extract 7 Brew Yext dates
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - scripts/extract_yext_dates.py
+      - .github/workflows/extract-yext.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: extract-7brew-yext-dates
+  cancel-in-progress: false
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Crawl official Yext pages and decode embedded fields
+        run: python scripts/extract_yext_dates.py
+      - name: Upload evidence outputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: 7brew-yext-dates-${{ github.run_id }}
+          path: outputs/
+          if-no-files-found: error
+          retention-days: 30
+      - name: Commit extracted dates
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add outputs/
+          if git diff --cached --quiet; then
+            echo "No output changes"
+          else
+            git commit -m "Extract official 7 Brew Yext dates"
+            git push
+          fi
