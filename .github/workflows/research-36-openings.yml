@@ -6,12 +6,18 @@ on:
     branches: [main]
     paths:
       - .github/workflows/research-36-openings.yml
+  pull_request:
+    branches: [main]
+    paths:
+      - data/7brew_field_absent_36.csv
+      - scripts/research_36_openings.py
+      - .github/workflows/research-36-openings.yml
 
 permissions:
   contents: read
 
 concurrency:
-  group: 7brew-36-source-research
+  group: 7brew-36-source-research-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
