@@ -1,0 +1,581 @@
+{
+  "generated_at_utc": "2026-07-12T22:52:30.432414+00:00",
+  "expected": {
+    "al": 37,
+    "fl": 51
+  },
+  "discovered": {
+    "al": 37,
+    "fl": 51
+  },
+  "total_rows": 88,
+  "http_200": 88,
+  "open_dates_found": 52,
+  "approval_dates_found": 0,
+  "parse_status_counts": {
+    "FIELD_NOT_FOUND": 36,
+    "FOUND": 52
+  },
+  "directory_audit": [
+    {
+      "url": "https://locations.7brew.com/al",
+      "status": 200,
+      "bytes": 103897,
+      "location_links": 0,
+      "city_links": 31,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/al/alabaster",
+      "status": 200,
+      "bytes": 50036,
+      "location_links": 1,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/al/athens",
+      "status": 200,
+      "bytes": 49959,
+      "location_links": 1,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/al/auburn",
+      "status": 200,
+      "bytes": 50015,
+      "location_links": 1,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/al/bay-minette",
+      "status": 200,
+      "bytes": 50028,
+      "location_links": 1,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/al/birmingham",
+      "status": 200,
+      "bytes": 52866,
+      "location_links": 2,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/al/calera",
+      "status": 200,
+      "bytes": 49915,
+      "location_links": 1,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/al/chelsea",
+      "status": 200,
+      "bytes": 50000,
+      "location_links": 1,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/al/cullman",
+      "status": 200,
+      "bytes": 50092,
+      "location_links": 1,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/al/daphne",
+      "status": 200,
+      "bytes": 49979,
+      "location_links": 1,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/al/decatur",
+      "status": 200,
+      "bytes": 52666,
+      "location_links": 2,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/al/dothan",
+      "status": 200,
+      "bytes": 52806,
+      "location_links": 2,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/al/enterprise",
+      "status": 200,
+      "bytes": 50128,
+      "location_links": 1,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/al/florence",
+      "status": 200,
+      "bytes": 49997,
+      "location_links": 1,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/al/foley",
+      "status": 200,
+      "bytes": 49952,
+      "location_links": 1,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/al/fultondale",
+      "status": 200,
+      "bytes": 50051,
+      "location_links": 1,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/al/gadsden",
+      "status": 200,
+      "bytes": 50068,
+      "location_links": 1,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/al/helena",
+      "status": 200,
+      "bytes": 49991,
+      "location_links": 1,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/al/homewood",
+      "status": 200,
+      "bytes": 50033,
+      "location_links": 1,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/al/huntsville",
+      "status": 200,
+      "bytes": 52900,
+      "location_links": 2,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/al/jacksonville",
+      "status": 200,
+      "bytes": 50039,
+      "location_links": 1,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/al/madison",
+      "status": 200,
+      "bytes": 50006,
+      "location_links": 1,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/al/millbrook",
+      "status": 200,
+      "bytes": 50054,
+      "location_links": 1,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/al/mobile",
+      "status": 200,
+      "bytes": 49959,
+      "location_links": 1,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/al/montgomery",
+      "status": 200,
+      "bytes": 52812,
+      "location_links": 2,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/al/moody",
+      "status": 200,
+      "bytes": 49932,
+      "location_links": 1,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/al/opelika",
+      "status": 200,
+      "bytes": 50024,
+      "location_links": 1,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/al/owens-cross-roads",
+      "status": 200,
+      "bytes": 50244,
+      "location_links": 1,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/al/troy",
+      "status": 200,
+      "bytes": 49943,
+      "location_links": 1,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/al/trussville",
+      "status": 200,
+      "bytes": 50081,
+      "location_links": 1,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/al/tuscaloosa",
+      "status": 200,
+      "bytes": 52832,
+      "location_links": 2,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/al/wetumpka",
+      "status": 200,
+      "bytes": 50049,
+      "location_links": 1,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/fl",
+      "status": 200,
+      "bytes": 115365,
+      "location_links": 0,
+      "city_links": 37,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/fl/belleview",
+      "status": 200,
+      "bytes": 50135,
+      "location_links": 1,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/fl/bradenton",
+      "status": 200,
+      "bytes": 55687,
+      "location_links": 3,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/fl/clermont",
+      "status": 200,
+      "bytes": 52703,
+      "location_links": 2,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/fl/crestview",
+      "status": 200,
+      "bytes": 50022,
+      "location_links": 1,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/fl/davenport",
+      "status": 200,
+      "bytes": 50055,
+      "location_links": 1,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/fl/daytona-beach",
+      "status": 200,
+      "bytes": 52834,
+      "location_links": 2,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/fl/deland",
+      "status": 200,
+      "bytes": 49980,
+      "location_links": 1,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/fl/fernandina-beach",
+      "status": 200,
+      "bytes": 50106,
+      "location_links": 1,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/fl/fort-pierce",
+      "status": 200,
+      "bytes": 50047,
+      "location_links": 1,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/fl/fort-walton-beach",
+      "status": 200,
+      "bytes": 50150,
+      "location_links": 1,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/fl/gainesville",
+      "status": 200,
+      "bytes": 50129,
+      "location_links": 1,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/fl/gulf-breeze",
+      "status": 200,
+      "bytes": 50122,
+      "location_links": 1,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/fl/jacksonville",
+      "status": 200,
+      "bytes": 55590,
+      "location_links": 3,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/fl/kissimmee",
+      "status": 200,
+      "bytes": 50115,
+      "location_links": 1,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/fl/lake-worth",
+      "status": 200,
+      "bytes": 50070,
+      "location_links": 1,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/fl/leesburg",
+      "status": 200,
+      "bytes": 52734,
+      "location_links": 2,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/fl/live-oak",
+      "status": 200,
+      "bytes": 50066,
+      "location_links": 1,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/fl/lynn-haven",
+      "status": 200,
+      "bytes": 50039,
+      "location_links": 1,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/fl/melbourne",
+      "status": 200,
+      "bytes": 55665,
+      "location_links": 3,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/fl/middleburg",
+      "status": 200,
+      "bytes": 50094,
+      "location_links": 1,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/fl/milton",
+      "status": 200,
+      "bytes": 49991,
+      "location_links": 1,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/fl/navarre",
+      "status": 200,
+      "bytes": 50030,
+      "location_links": 1,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/fl/niceville",
+      "status": 200,
+      "bytes": 50018,
+      "location_links": 1,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/fl/okeechobee",
+      "status": 200,
+      "bytes": 50102,
+      "location_links": 1,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/fl/orlando",
+      "status": 200,
+      "bytes": 50063,
+      "location_links": 1,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/fl/pace",
+      "status": 200,
+      "bytes": 49955,
+      "location_links": 1,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/fl/palm-bay",
+      "status": 200,
+      "bytes": 52720,
+      "location_links": 2,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/fl/panama-city",
+      "status": 200,
+      "bytes": 52900,
+      "location_links": 2,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/fl/pensacola",
+      "status": 200,
+      "bytes": 55542,
+      "location_links": 3,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/fl/port-charlotte",
+      "status": 200,
+      "bytes": 50118,
+      "location_links": 1,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/fl/port-st.-lucie",
+      "status": 200,
+      "bytes": 50215,
+      "location_links": 1,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/fl/rockledge",
+      "status": 200,
+      "bytes": 49993,
+      "location_links": 1,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/fl/spring-hill",
+      "status": 200,
+      "bytes": 50091,
+      "location_links": 1,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/fl/tallahassee",
+      "status": 200,
+      "bytes": 52750,
+      "location_links": 2,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/fl/tampa",
+      "status": 200,
+      "bytes": 50057,
+      "location_links": 1,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/fl/west-palm-beach",
+      "status": 200,
+      "bytes": 50125,
+      "location_links": 1,
+      "city_links": 0,
+      "error": ""
+    },
+    {
+      "url": "https://locations.7brew.com/fl/winter-springs",
+      "status": 200,
+      "bytes": 50255,
+      "location_links": 1,
+      "city_links": 0,
+      "error": ""
+    }
+  ]
+}
