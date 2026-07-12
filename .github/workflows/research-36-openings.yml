@@ -1,5 +1,6 @@
 name: Research 36 supplemental 7 Brew opening sources
 
+# Triggered after the base branch enabled pull_request execution.
 on:
   workflow_dispatch:
   pull_request:
