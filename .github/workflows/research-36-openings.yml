@@ -1,0 +1,38 @@
+name: Research 36 supplemental 7 Brew opening sources
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/research-36-openings.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: 7brew-36-source-research
+  cancel-in-progress: false
+
+jobs:
+  research:
+    runs-on: ubuntu-latest
+    timeout-minutes: 70
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: run-yext-extractor
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install research dependencies
+        run: python -m pip install --upgrade requests beautifulsoup4 lxml
+      - name: Search, fetch, and preserve opening evidence
+        run: python scripts/research_36_openings.py
+      - name: Upload supplemental opening research
+        uses: actions/upload-artifact@v4
+        with:
+          name: 7brew-36-opening-source-research-${{ github.run_id }}
+          path: research_outputs/
+          if-no-files-found: error
+          retention-days: 30
