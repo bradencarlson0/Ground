@@ -1,5 +1,6 @@
 name: Parallel research 36 supplemental opening sources
 
+# Monitored pull-request run for the 36-location supplemental evidence audit.
 on:
   workflow_dispatch:
   push:
