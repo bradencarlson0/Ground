@@ -1,0 +1,58 @@
+name: Parallel research 36 supplemental opening sources
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/research-36-openings-parallel.yml
+
+permissions:
+  contents: read
+
+jobs:
+  research-batch:
+    strategy:
+      fail-fast: false
+      matrix:
+        batch: [0, 1, 2, 3, 4, 5]
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: research-36-openings-only
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Keep six locations for this batch
+        env:
+          BATCH: ${{ matrix.batch }}
+        run: |
+          python - <<'PY'
+          import csv, os
+          from pathlib import Path
+          path = Path('data/7brew_field_absent_36.csv')
+          with path.open(newline='', encoding='utf-8-sig') as f:
+              rows = list(csv.DictReader(f))
+              fields = list(rows[0])
+          batch = int(os.environ['BATCH'])
+          selected = [row for i, row in enumerate(rows) if i % 6 == batch]
+          with path.open('w', newline='', encoding='utf-8') as f:
+              w = csv.DictWriter(f, fieldnames=fields)
+              w.writeheader(); w.writerows(selected)
+          print('batch', batch, 'locations', len(selected))
+          for row in selected:
+              print(row['state'], row['city'], row['address'])
+          PY
+      - name: Install research dependencies
+        run: python -m pip install --upgrade requests beautifulsoup4 lxml
+      - name: Search and preserve evidence
+        run: python scripts/research_36_openings.py
+      - name: Upload batch research
+        uses: actions/upload-artifact@v4
+        with:
+          name: 7brew-opening-research-batch-${{ matrix.batch }}-${{ github.run_id }}
+          path: research_outputs/
+          if-no-files-found: error
+          retention-days: 30
