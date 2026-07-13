@@ -1,0 +1,32 @@
+name: Collect Wayback bounds for 36 7 Brew pages
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/wayback-36.yml
+
+permissions:
+  contents: read
+
+jobs:
+  wayback:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: research-36-openings-only
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Query Internet Archive CDX
+        run: python scripts/wayback_36.py
+      - name: Upload Wayback evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: 7brew-36-wayback-${{ github.run_id }}
+          path: wayback_outputs/
+          if-no-files-found: error
+          retention-days: 30
