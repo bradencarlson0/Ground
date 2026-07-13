@@ -6,6 +6,11 @@ on:
     branches: [main]
     paths:
       - .github/workflows/wayback-36.yml
+  pull_request:
+    branches: [main]
+    paths:
+      - scripts/wayback_36.py
+      - .github/workflows/wayback-36.yml
 
 permissions:
   contents: read
