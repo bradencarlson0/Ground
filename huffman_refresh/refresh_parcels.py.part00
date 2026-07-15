@@ -1,0 +1,216 @@
+from __future__ import annotations
+
+import csv
+import gzip
+import io
+import json
+import math
+import os
+import re
+import sys
+import time
+from dataclasses import dataclass, asdict
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Iterable, Sequence
+
+import geopandas as gpd
+import mercantile
+import numpy as np
+import pandas as pd
+import requests
+from pyproj import CRS
+from requests.adapters import HTTPAdapter
+from shapely import make_valid
+from shapely.geometry import GeometryCollection, box, shape
+from shapely.ops import unary_union
+from urllib3.util.retry import Retry
+
+ROOT = Path(__file__).resolve().parent
+INPUT = ROOT / "candidate_parcel_manifest_460.csv"
+OUT = ROOT / "output"
+RAW = OUT / "raw"
+OUT.mkdir(exist_ok=True)
+RAW.mkdir(exist_ok=True)
+
+RUN_AT = datetime.now(timezone.utc).isoformat()
+VERSION = "huffman_physical_refresh_2026-07-15_v1"
+CRS_WGS84 = "EPSG:4326"
+CRS_DFW_FT = "EPSG:2276"  # NAD83 / Texas North Central (ftUS)
+FT2_PER_ACRE = 43560.0
+
+SOURCES = {
+    "collin_parcels": "https://services2.arcgis.com/uXyoacYrZTPTKD3R/ArcGIS/rest/services/CCAD_Parcel_Feature_Set/FeatureServer/4",
+    "denton_parcels": "https://geo.dentoncad.com/arcgis/rest/services/Hosted/Parcels_with_CAMA_Data/FeatureServer/0",
+    "frisco_zoning": "https://maps.friscotexas.gov/gis/rest/services/Public/TRAKiT_Map/MapServer/53",
+    "mckinney_zoning": "https://maps.mckinneytexas.org/mckinney/rest/services/MapServices/Planning/MapServer/0",
+    "celina_zoning": "https://services1.arcgis.com/x4nhme9V33KOzAfr/ArcGIS/rest/services/ZoningDistricts/FeatureServer/12",
+    "prosper_planning_root": "https://services8.arcgis.com/8ofMLzOrtxGP9wVQ/ArcGIS/rest/services/Planning/FeatureServer",
+    "fema_flood": "https://services.arcgis.com/P3ePLMYs2RVChkJx/ArcGIS/rest/services/USA_Flood_Hazard_Reduced_Set_gdb/FeatureServer/0",
+    "nwi_wetlands": "https://fwspublicservices.wim.usgs.gov/wetlandsmapservice/rest/services/Wetlands/MapServer/0",
+    "water_ccn": "https://services6.arcgis.com/N6Lzvtb46cpxThhu/ArcGIS/rest/services/Water_CCN_Service_Areas/FeatureServer/210",
+    "sewer_ccn": "https://services6.arcgis.com/N6Lzvtb46cpxThhu/ArcGIS/rest/services/Sewer_CCN_Service_Areas/FeatureServer/230",
+    "water_lines": "https://services6.arcgis.com/N6Lzvtb46cpxThhu/ArcGIS/rest/services/Water_CCN_Facility_Lines/FeatureServer/200",
+    "sewer_lines": "https://services6.arcgis.com/N6Lzvtb46cpxThhu/ArcGIS/rest/services/Sewer_CCN_Facility_Lines/FeatureServer/220",
+    "tceq_districts": "https://gisweb.tceq.texas.gov/arcgis/rest/services/Public/Districts/MapServer/0",
+    "ms_manifest": "https://minedbuildings.z5.web.core.windows.net/global-buildings/dataset-links.csv",
+    "hifld_hospitals": "https://services1.arcgis.com/Hp6G80Pky0om7QvQ/ArcGIS/rest/services/Hospitals/FeatureServer/0",
+    "arcgis_search": "https://www.arcgis.com/sharing/rest/search",
+}
+
+SESSION = requests.Session()
+retries = Retry(
+    total=5,
+    backoff_factor=1.0,
+    status_forcelist=(429, 500, 502, 503, 504),
+    allowed_methods=frozenset(["GET", "POST"]),
+)
+SESSION.mount("https://", HTTPAdapter(max_retries=retries, pool_connections=20, pool_maxsize=20))
+SESSION.headers.update({"User-Agent": "Huffman-DFW-Medical-Parcel-Refresh/1.0"})
+
+
+@dataclass
+class SourceLog:
+    source_name: str
+    source_url: str
+    started_at: str
+    completed_at: str | None = None
+    status: str = "started"
+    row_count: int | None = None
+    error: str | None = None
+    notes: str | None = None
+    metadata_last_edit: str | None = None
+
+
+LOGS: list[SourceLog] = []
+
+
+def log_start(name: str, url: str, notes: str | None = None) -> SourceLog:
+    item = SourceLog(name, url, datetime.now(timezone.utc).isoformat(), notes=notes)
+    LOGS.append(item)
+    return item
+
+
+def log_finish(item: SourceLog, status: str, row_count: int | None = None, error: Exception | str | None = None, notes: str | None = None) -> None:
+    item.completed_at = datetime.now(timezone.utc).isoformat()
+    item.status = status
+    item.row_count = row_count
+    if error is not None:
+        item.error = str(error)
+    if notes:
+        item.notes = ((item.notes + " | ") if item.notes else "") + notes
+
+
+def write_logs() -> None:
+    pd.DataFrame([asdict(x) for x in LOGS]).to_csv(OUT / "source_run_log.csv", index=False)
+
+
+def clean_scalar(v: Any) -> Any:
+    if isinstance(v, (np.generic,)):
+        return v.item()
+    if pd.isna(v):
+        return None
+    return v
+
+
+def get_json(url: str, params: dict[str, Any] | None = None, method: str = "GET", timeout: int = 120) -> dict[str, Any]:
+    if method == "POST":
+        response = SESSION.post(url, data=params or {}, timeout=timeout)
+    else:
+        response = SESSION.get(url, params=params or {}, timeout=timeout)
+    response.raise_for_status()
+    data = response.json()
+    if isinstance(data, dict) and "error" in data:
+        raise RuntimeError(f"ArcGIS error at {url}: {data['error']}")
+    return data
+
+
+def layer_metadata(layer_url: str) -> dict[str, Any]:
+    return get_json(layer_url, {"f": "json"})
+
+
+def metadata_last_edit(meta: dict[str, Any]) -> str | None:
+    value = (meta.get("editingInfo") or {}).get("lastEditDate")
+    if not value:
+        return None
+    try:
+        return datetime.fromtimestamp(float(value) / 1000, tz=timezone.utc).isoformat()
+    except Exception:
+        return str(value)
+
+
+def features_to_gdf(payload: dict[str, Any], crs: str = CRS_WGS84) -> gpd.GeoDataFrame:
+    feats = payload.get("features") or []
+    if not feats:
+        return gpd.GeoDataFrame(geometry=[], crs=crs)
+    gdf = gpd.GeoDataFrame.from_features(feats, crs=crs)
+    if gdf.crs is None:
+        gdf = gdf.set_crs(crs)
+    elif str(gdf.crs) != crs:
+        gdf = gdf.to_crs(crs)
+    return gdf
+
+
+def arcgis_query_where(layer_url: str, where: str, out_fields: str = "*", return_geometry: bool = True) -> gpd.GeoDataFrame:
+    params = {
+        "f": "geojson",
+        "where": where,
+        "outFields": out_fields,
+        "returnGeometry": str(return_geometry).lower(),
+        "outSR": 4326,
+    }
+    payload = get_json(f"{layer_url}/query", params, method="POST")
+    return features_to_gdf(payload)
+
+
+def arcgis_query_object_ids(layer_url: str, object_ids: Sequence[Any], out_fields: str = "*") -> gpd.GeoDataFrame:
+    if not object_ids:
+        return gpd.GeoDataFrame(geometry=[], crs=CRS_WGS84)
+    parts: list[gpd.GeoDataFrame] = []
+    for start in range(0, len(object_ids), 400):
+        chunk = object_ids[start:start + 400]
+        payload = get_json(
+            f"{layer_url}/query",
+            {
+                "f": "geojson",
+                "objectIds": ",".join(map(str, chunk)),
+                "outFields": out_fields,
+                "returnGeometry": "true",
+                "outSR": 4326,
+            },
+            method="POST",
+        )
+        part = features_to_gdf(payload)
+        if not part.empty:
+            parts.append(part)
+    if not parts:
+        return gpd.GeoDataFrame(geometry=[], crs=CRS_WGS84)
+    return pd.concat(parts, ignore_index=True).set_crs(CRS_WGS84)
+
+
+def arcgis_query_bbox(layer_url: str, bbox_wgs84: tuple[float, float, float, float], out_fields: str = "*") -> gpd.GeoDataFrame:
+    xmin, ymin, xmax, ymax = bbox_wgs84
+    envelope = json.dumps({
+        "xmin": xmin,
+        "ymin": ymin,
+        "xmax": xmax,
+        "ymax": ymax,
+        "spatialReference": {"wkid": 4326},
+    })
+    common = {
+        "where": "1=1",
+        "geometry": envelope,
+        "geometryType": "esriGeometryEnvelope",
+        "inSR": 4326,
+        "spatialRel": "esriSpatialRelIntersects",
+    }
+    try:
+        ids_payload = get_json(
+            f"{layer_url}/query",
+            {**common, "f": "json", "returnIdsOnly": "true"},
+            method="POST",
+        )
+        object_ids = ids_payload.get("objectIds") or []
+        if object_ids:
+            return arcgis_query_object_ids(layer_url, object_ids, out_fields=out_fields)
+        if "objectIds" in ids_payload:
