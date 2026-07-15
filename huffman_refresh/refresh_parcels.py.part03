@@ -1,0 +1,172 @@
+        types = sorted({safe_str(v) for v in (wsub[wet_field] if wet_field else []) if safe_str(v)})
+
+        constraints = []
+        if sfha_geoms:
+            constraints.extend([g.intersection(geom) for g in sfha_geoms if g.intersects(geom)])
+        if not wsub.empty:
+            constraints.extend([g.intersection(geom) for g in wsub.geometry if g.intersects(geom)])
+        if constraints:
+            try:
+                usable = geom.difference(unary_union(constraints))
+            except Exception:
+                usable = geom
+        else:
+            usable = geom
+        pieces = []
+        if usable.geom_type == "Polygon": pieces = [usable]
+        elif usable.geom_type == "MultiPolygon": pieces = list(usable.geoms)
+        elif isinstance(usable, GeometryCollection): pieces = [g for g in usable.geoms if g.geom_type == "Polygon"]
+        largest = max((x.area for x in pieces), default=0.0)
+
+        any_pct.append(100 * farea / area if area else np.nan)
+        sfha_pct.append(100 * sfha_area / area if area else np.nan)
+        flood_zones.append("|".join(sorted(set(zones))))
+        wet_pct.append(100 * warea / area if area else np.nan)
+        wet_types.append("|".join(types))
+        usable_acres.append(usable.area / FT2_PER_ACRE if usable else 0.0)
+        largest_acres.append(largest / FT2_PER_ACRE)
+
+    p["flood_any_pct_live"] = any_pct
+    p["flood_sfha_pct_live"] = sfha_pct
+    p["flood_zones_live"] = flood_zones
+    p["wetlands_pct_live"] = wet_pct
+    p["wetland_types_live"] = wet_types
+    p["environmentally_unconstrained_acres"] = usable_acres
+    p["largest_contiguous_unconstrained_acres"] = largest_acres
+    return p.to_crs(CRS_WGS84)
+
+
+def quadkey_bounds(quadkey: str) -> tuple[float, float, float, float] | None:
+    try:
+        tile = mercantile.quadkey_to_tile(str(quadkey))
+        b = mercantile.bounds(tile)
+        return b.west, b.south, b.east, b.north
+    except Exception:
+        return None
+
+
+def bbox_intersects(a, b) -> bool:
+    return not (a[2] < b[0] or a[0] > b[2] or a[3] < b[1] or a[1] > b[3])
+
+
+def load_ms_buildings(bbox_wgs84: tuple[float, float, float, float]) -> gpd.GeoDataFrame:
+    url = SOURCES["ms_manifest"]
+    log = log_start("microsoft_building_footprints_2026", url)
+    try:
+        response = SESSION.get(url, timeout=120)
+        response.raise_for_status()
+        manifest = pd.read_csv(io.BytesIO(response.content), dtype=str)
+        cols = {c.lower(): c for c in manifest.columns}
+        qcol = cols.get("quadkey")
+        ucol = cols.get("url")
+        lcol = cols.get("location")
+        if not qcol or not ucol:
+            raise RuntimeError(f"Unexpected Microsoft manifest columns: {manifest.columns.tolist()}")
+        if lcol:
+            us = manifest[manifest[lcol].fillna("").str.contains("United States", case=False, regex=False)].copy()
+            if us.empty:
+                us = manifest.copy()
+        else:
+            us = manifest.copy()
+        matches = []
+        for _, row in us.iterrows():
+            bounds = quadkey_bounds(row[qcol])
+            if bounds and bbox_intersects(bounds, bbox_wgs84):
+                matches.append(row)
+        if not matches:
+            raise RuntimeError("No Microsoft building tiles intersect AOI")
+
+        aoi = box(*bbox_wgs84)
+        features = []
+        bytes_downloaded = 0
+        tile_log = []
+        for row in matches:
+            tile_url = row[ucol]
+            started = time.time()
+            with SESSION.get(tile_url, stream=True, timeout=300) as r:
+                r.raise_for_status()
+                raw = r.raw
+                gz = gzip.GzipFile(fileobj=raw)
+                count = 0
+                for line in gz:
+                    if not line.strip():
+                        continue
+                    try:
+                        feat = json.loads(line)
+                        geom_json = feat.get("geometry") if feat.get("type") == "Feature" else feat.get("geometry", feat)
+                        geom = shape(geom_json)
+                        if geom.is_empty or not geom.intersects(aoi):
+                            continue
+                        props = feat.get("properties") or {}
+                        features.append({**props, "geometry": geom})
+                        count += 1
+                    except Exception:
+                        continue
+                bytes_downloaded += int(r.headers.get("Content-Length") or 0)
+                tile_log.append({"quadkey": row[qcol], "url": tile_url, "features_in_aoi": count, "seconds": round(time.time() - started, 1)})
+        (RAW / "microsoft_tile_log.json").write_text(json.dumps(tile_log, indent=2), encoding="utf-8")
+        if not features:
+            gdf = gpd.GeoDataFrame(geometry=[], crs=CRS_WGS84)
+        else:
+            gdf = gpd.GeoDataFrame(features, geometry="geometry", crs=CRS_WGS84)
+            gdf = sanitize_geometry(gdf)
+            gdf["_wkb"] = gdf.geometry.apply(lambda x: x.wkb_hex)
+            gdf = gdf.drop_duplicates("_wkb").drop(columns="_wkb")
+        log_finish(log, "success", len(gdf), notes=f"tiles={len(matches)}; bytes_header_total={bytes_downloaded}")
+        return gdf
+    except Exception as exc:
+        log_finish(log, "failed", error=exc)
+        return gpd.GeoDataFrame(geometry=[], crs=CRS_WGS84)
+
+
+def building_metrics(parcels: gpd.GeoDataFrame, buildings: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    p = parcels.to_crs(CRS_DFW_FT).copy()
+    b = buildings.to_crs(CRS_DFW_FT) if not buildings.empty else buildings
+    sidx = b.sindex if not b.empty else None
+    counts, areas, coverage, max_conf, max_height = [], [], [], [], []
+    conf_field = find_field(b.columns, exact=["confidence"], contains=["confidence"]) if not b.empty else None
+    height_field = find_field(b.columns, exact=["height"], contains=["height"]) if not b.empty else None
+    for geom in p.geometry:
+        idx = list(sidx.query(geom, predicate="intersects")) if sidx is not None else []
+        sub = b.iloc[idx] if idx else b.iloc[0:0]
+        inter_areas = []
+        for bg in sub.geometry:
+            try: inter_areas.append(bg.intersection(geom).area)
+            except Exception: pass
+        total = sum(inter_areas)
+        counts.append(len(sub))
+        areas.append(total)
+        coverage.append(100 * total / geom.area if geom.area else np.nan)
+        max_conf.append(to_numeric(sub[conf_field]).max() if conf_field and not sub.empty else np.nan)
+        max_height.append(to_numeric(sub[height_field]).max() if height_field and not sub.empty else np.nan)
+    p["ms_building_count"] = counts
+    p["ms_building_area_sf"] = areas
+    p["ms_building_coverage_pct"] = coverage
+    p["ms_building_max_confidence"] = max_conf
+    p["ms_building_max_height_m"] = max_height
+    return p.to_crs(CRS_WGS84)
+
+
+def service_area_metrics(parcels: gpd.GeoDataFrame, layer: gpd.GeoDataFrame, prefix: str) -> gpd.GeoDataFrame:
+    p = parcels.copy()
+    for col in [f"{prefix}_ccn_no", f"{prefix}_utility", f"{prefix}_dba", f"{prefix}_ccn_status", f"{prefix}_ccn_overlap_pct"]:
+        p[col] = None
+    if layer.empty:
+        return p
+    lp = layer.to_crs(CRS_DFW_FT)
+    pp = p.to_crs(CRS_DFW_FT)
+    sidx = lp.sindex
+    ccn_field = find_field(lp.columns, exact=["CCN_NO"], contains=["ccn_no", "ccn"])
+    utility_field = find_field(lp.columns, exact=["UTILITY"], contains=["utility"])
+    dba_field = find_field(lp.columns, exact=["DBA_NAME"], contains=["dba"])
+    status_field = find_field(lp.columns, exact=["STATUS"], contains=["status"])
+    values = []
+    for geom in pp.geometry:
+        idx = list(sidx.query(geom, predicate="intersects"))
+        sub = lp.iloc[idx] if idx else lp.iloc[0:0]
+        entries = []
+        for _, row in sub.iterrows():
+            inter_area = row.geometry.intersection(geom).area if row.geometry.intersects(geom) else 0
+            entries.append((inter_area, row))
+        entries.sort(key=lambda x: x[0], reverse=True)
+        if entries:
