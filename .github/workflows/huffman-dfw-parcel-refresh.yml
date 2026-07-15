@@ -29,10 +29,10 @@ jobs:
           cache: pip
           cache-dependency-path: huffman_refresh/requirements.txt
 
-      - name: Materialize compressed pipeline inputs
+      - name: Materialize chunked pipeline inputs
         run: |
-          cat refresh_parcels.py.gz.b64.part* | base64 -d | gzip -d > refresh_parcels.py
-          cat candidate_parcel_manifest_460.csv.gz.b64.part* | base64 -d | gzip -d > candidate_parcel_manifest_460.csv
+          cat refresh_parcels.py.part* > refresh_parcels.py
+          cat candidate_parcel_manifest_460.csv.part* > candidate_parcel_manifest_460.csv
           python -m py_compile refresh_parcels.py
           test "$(wc -l < candidate_parcel_manifest_460.csv)" -eq 461
 
