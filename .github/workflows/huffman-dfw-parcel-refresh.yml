@@ -1,0 +1,66 @@
+name: Huffman DFW parcel refresh
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'huffman_refresh/**'
+      - '.github/workflows/huffman-dfw-parcel-refresh.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    defaults:
+      run:
+        working-directory: huffman_refresh
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: huffman_refresh/requirements.txt
+
+      - name: Materialize compressed pipeline inputs
+        run: |
+          base64 -d refresh_parcels.py.gz.b64 | gzip -d > refresh_parcels.py
+          base64 -d candidate_parcel_manifest_460.csv.gz.b64 | gzip -d > candidate_parcel_manifest_460.csv
+          python -m py_compile refresh_parcels.py
+
+      - name: Install geospatial dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run live parcel refresh and joins
+        run: python refresh_parcels.py
+
+      - name: Create artifact archive
+        if: always()
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import shutil
+          out = Path('output')
+          if out.exists():
+              shutil.make_archive('huffman_dfw_parcel_refresh_output', 'zip', out)
+          PY
+
+      - name: Upload complete output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: huffman-dfw-parcel-refresh
+          path: |
+            huffman_refresh/output/**
+            huffman_refresh/huffman_dfw_parcel_refresh_output.zip
+          if-no-files-found: warn
+          retention-days: 14
