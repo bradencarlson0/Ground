@@ -1,0 +1,36 @@
+        "water_utility", "sewer_utility", "physical_gate_status", "risk_adjusted_screening_score",
+        "rank_overall", "geometry"
+    ] if c in output_gdf.columns]
+    write_gdf(output_gdf[map_cols], OUT / "huffman_candidate_parcels_map.geojson")
+
+    tabular = pd.DataFrame(output_gdf.drop(columns="geometry"))
+    tabular.to_csv(OUT / "huffman_candidate_parcel_master_refreshed.csv", index=False)
+    tabular.sort_values("risk_adjusted_screening_score", ascending=False).to_csv(OUT / "huffman_ranked_physical_shortlist.csv", index=False)
+
+    qa = {
+        "run_at": RUN_AT,
+        "score_version": VERSION,
+        "candidate_count": len(output_gdf),
+        "geometry_count": int(output_gdf.geometry.notna().sum()),
+        "city_counts": output_gdf["controlling_city"].value_counts(dropna=False).to_dict(),
+        "gate_counts": output_gdf["physical_gate_status"].value_counts(dropna=False).to_dict(),
+        "zoning_status_counts": output_gdf["medical_zoning_status"].value_counts(dropna=False).to_dict(),
+        "vacancy_counts": output_gdf["vacancy_class_live"].value_counts(dropna=False).to_dict(),
+        "utility_counts": output_gdf["utility_territory_status"].value_counts(dropna=False).to_dict(),
+        "water_provider_coverage": int((output_gdf["water_utility"].fillna("").astype(str).str.len() > 0).sum()),
+        "sewer_provider_coverage": int((output_gdf["sewer_utility"].fillna("").astype(str).str.len() > 0).sum()),
+        "building_footprint_coverage": int((to_numeric(output_gdf["ms_building_count"]).fillna(0) > 0).sum()),
+        "live_aadt_coverage": int(to_numeric(output_gdf["aadt_live"]).notna().sum()),
+        "live_zoning_coverage": int(output_gdf["zoning_code_live"].notna().sum()),
+        "source_failures": [asdict(x) for x in LOGS if x.status == "failed"],
+    }
+    (OUT / "qa_report.json").write_text(json.dumps(qa, indent=2, default=clean_scalar), encoding="utf-8")
+    write_logs()
+    print(json.dumps(qa, indent=2, default=clean_scalar))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    finally:
+        write_logs()
