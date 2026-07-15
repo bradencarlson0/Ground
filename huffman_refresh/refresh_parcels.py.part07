@@ -1,0 +1,142 @@
+    for col in out.columns:
+        if col == "geometry": continue
+        if out[col].dtype == "object":
+            out[col] = out[col].apply(lambda v: json.dumps(v, ensure_ascii=False) if isinstance(v, (list, dict, tuple, set)) else v)
+    if path.suffix == ".parquet":
+        out.to_parquet(path, index=False)
+    elif path.suffix in {".geojson", ".json"}:
+        out.to_file(path, driver="GeoJSON")
+    elif path.suffix == ".gpkg":
+        out.to_file(path, driver="GPKG", layer="candidate_parcels")
+    else:
+        raise ValueError(path)
+
+
+def save_raw(name: str, gdf: gpd.GeoDataFrame) -> None:
+    if gdf.empty:
+        return
+    try:
+        write_gdf(gdf, RAW / f"{name}.parquet")
+    except Exception as exc:
+        print(f"WARN could not save raw {name}: {exc}")
+
+
+def main() -> None:
+    if not INPUT.exists():
+        raise FileNotFoundError(INPUT)
+    manifest = pd.read_csv(INPUT, dtype=str)
+    numeric_manifest = [
+        "acreage_gross_baseline", "net_usable_sf_est_baseline", "floodplain_pct_baseline",
+        "wetlands_pct_baseline", "aadt_primary_frontage_baseline", "drive_minutes_hospital_baseline",
+        "score_baseline", "centroid_lat_baseline", "centroid_lon_baseline", "pd_confidence",
+    ]
+    for col in numeric_manifest:
+        if col in manifest:
+            manifest[col] = pd.to_numeric(manifest[col], errors="coerce")
+    manifest["controlling_city"] = manifest["controlling_city"].fillna(manifest["raw_situs_city"]).str.upper()
+
+    print("1/12 Pulling live Collin and Denton parcel polygons/CAD attributes...")
+    live = pull_candidate_parcels(manifest)
+    live = standardize_parcel_attributes(live, manifest)
+    live = geometry_metrics(live)
+    save_raw("candidate_parcels_live", live)
+
+    bbox = tuple(float(x) for x in live.total_bounds)
+    pad = 0.03
+    bbox_pad = (bbox[0] - pad, bbox[1] - pad, bbox[2] + pad, bbox[3] + pad)
+    (OUT / "aoi_bbox.json").write_text(json.dumps({"bbox": bbox_pad, "crs": "EPSG:4326"}, indent=2), encoding="utf-8")
+
+    print("2/12 Refreshing municipal zoning polygons...")
+    live = join_live_zoning(live, bbox_pad)
+
+    print("3/12 Pulling FEMA flood hazard...")
+    flood = query_overlay("fema_flood", SOURCES["fema_flood"], bbox_pad, out_fields="FLD_ZONE,ZONE_SUBTY")
+    save_raw("fema_flood", flood)
+
+    print("4/12 Pulling NWI wetlands...")
+    wetlands = query_overlay("nwi_wetlands", SOURCES["nwi_wetlands"], bbox_pad, out_fields="*")
+    save_raw("nwi_wetlands", wetlands)
+    live = environmental_metrics(live, flood, wetlands)
+
+    print("5/12 Pulling Microsoft 2026 building footprints...")
+    buildings = load_ms_buildings(bbox_pad)
+    save_raw("microsoft_buildings_aoi", buildings)
+    live = building_metrics(live, buildings)
+
+    print("6/12 Pulling water and sewer CCN territories...")
+    water = query_overlay("water_ccn", SOURCES["water_ccn"], bbox_pad)
+    sewer = query_overlay("sewer_ccn", SOURCES["sewer_ccn"], bbox_pad)
+    save_raw("water_ccn", water); save_raw("sewer_ccn", sewer)
+    live = service_area_metrics(live, water, "water")
+    live = service_area_metrics(live, sewer, "sewer")
+
+    print("7/12 Pulling water/sewer facility lines...")
+    water_lines = query_overlay("water_ccn_facility_lines", SOURCES["water_lines"], bbox_pad)
+    sewer_lines = query_overlay("sewer_ccn_facility_lines", SOURCES["sewer_lines"], bbox_pad)
+    save_raw("water_facility_lines", water_lines); save_raw("sewer_facility_lines", sewer_lines)
+    live = nearest_line_metrics(live, water_lines, "water")
+    live = nearest_line_metrics(live, sewer_lines, "sewer")
+
+    print("8/12 Pulling TCEQ districts/MUD context...")
+    districts = query_overlay("tceq_districts", SOURCES["tceq_districts"], bbox_pad)
+    save_raw("tceq_districts", districts)
+    live = tceq_district_metrics(live, districts)
+
+    print("9/12 Discovering and pulling TxDOT roadway/AADT layers...")
+    road_url, aadt_url, _ = discover_txdot_layers()
+    roads = query_overlay("txdot_roads", road_url, bbox_pad) if road_url else gpd.GeoDataFrame(geometry=[], crs=CRS_WGS84)
+    aadt = query_overlay("txdot_aadt", aadt_url, bbox_pad) if aadt_url and aadt_url != road_url else roads
+    save_raw("txdot_roads", roads)
+    if aadt_url != road_url: save_raw("txdot_aadt", aadt)
+    live = road_metrics(live, roads, aadt)
+
+    print("10/12 Pulling hospital locations and computing distance...")
+    hospitals = query_overlay("hifld_hospitals", SOURCES["hifld_hospitals"], bbox_pad)
+    save_raw("hospitals", hospitals)
+    live = hospital_metrics(live, hospitals)
+
+    print("11/12 Scoring and applying transparent gates...")
+    live = score_and_gate(live)
+
+    # Select stable canonical output columns first; append raw/source columns afterwards.
+    canonical = [
+        "parcel_sk", "source_county", "source_parcel_id", "controlling_city", "raw_situs_city",
+        "situs_address_live", "situs_address", "owner_name_live", "legal_description_live",
+        "gross_acres_calc", "cad_acres_live", "acreage_gross_baseline", "gross_area_sqft_calc",
+        "perimeter_ft", "min_rotated_width_ft", "max_rotated_depth_ft", "shape_aspect_ratio",
+        "shape_compactness", "shape_convexity", "geometry_acreage_delta_pct",
+        "market_value_live", "land_value_live", "improvement_value_live", "improvement_sqft_live",
+        "year_built_live", "cad_use_code_live", "cad_property_type_live", "homestead_flag_live",
+        "zoning_code_live", "zoning_code_baseline", "zoning_code_effective", "zoning_source_url",
+        "medical_prepass_bucket", "pd_final_status", "pd_evidence_grade", "pd_confidence",
+        "medical_zoning_status", "zoning_confidence", "parcel_to_tract_required",
+        "ms_building_count", "ms_building_area_sf", "ms_building_coverage_pct",
+        "vacancy_class_live", "vacancy_confidence",
+        "flood_any_pct_live", "flood_sfha_pct_live", "flood_zones_live",
+        "wetlands_pct_live", "wetland_types_live", "environmentally_unconstrained_acres",
+        "largest_contiguous_unconstrained_acres",
+        "primary_road_live", "road_functional_class_live", "frontage_proxy_ft", "corner_proxy_flag",
+        "aadt_live", "aadt_year_live", "aadt_distance_ft", "road_source_method",
+        "water_ccn_no", "water_utility", "water_dba", "water_ccn_status", "water_ccn_overlap_pct",
+        "sewer_ccn_no", "sewer_utility", "sewer_dba", "sewer_ccn_status", "sewer_ccn_overlap_pct",
+        "water_facility_line_distance_ft", "water_facility_line_name", "water_line_nearby_500ft",
+        "sewer_facility_line_distance_ft", "sewer_facility_line_name", "sewer_line_nearby_500ft",
+        "utility_territory_status", "tceq_district_names", "tceq_district_types",
+        "nearest_hospital_live", "nearest_hospital_type_live", "hospital_distance_mi_live",
+        "nearest_hospital_baseline", "drive_minutes_hospital_baseline",
+        "geometry_score", "environmental_score", "vacancy_score", "access_score", "utility_score",
+        "physical_feasibility_score", "score_baseline", "risk_adjusted_screening_score",
+        "physical_gate_status", "gate_reasons", "rank_overall", "rank_within_city",
+        "score_version", "refresh_timestamp_utc", "pd_source_url", "pd_doc_link", "geometry",
+    ]
+    canonical = [c for c in canonical if c in live.columns]
+    output_gdf = live[canonical].copy()
+    output_gdf = output_gdf.sort_values(["physical_gate_status", "risk_adjusted_screening_score"], ascending=[True, False])
+
+    print("12/12 Writing GeoPackage, GeoParquet, GeoJSON, CSV and QA reports...")
+    write_gdf(output_gdf, OUT / "huffman_candidate_parcel_master_refreshed.parquet")
+    write_gdf(output_gdf, OUT / "huffman_candidate_parcel_master_refreshed.gpkg")
+    # GeoJSON only needs a practical map subset.
+    map_cols = [c for c in [
+        "parcel_sk", "controlling_city", "gross_acres_calc", "medical_zoning_status", "vacancy_class_live",
+        "flood_sfha_pct_live", "wetlands_pct_live", "primary_road_live", "aadt_live",
