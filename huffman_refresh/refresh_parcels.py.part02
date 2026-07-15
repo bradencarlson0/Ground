@@ -1,0 +1,182 @@
+        "market_value_live", "land_value_live", "improvement_value_live", "improvement_sqft_live",
+        "year_built_live", "cad_acres_live", "cad_land_sqft_live",
+    ]:
+        if numeric in gdf:
+            gdf[numeric] = to_numeric(gdf[numeric])
+    return gdf
+
+
+def geometry_metrics(parcels: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    gdf = parcels.to_crs(CRS_DFW_FT).copy()
+    gdf["geometry_valid"] = gdf.geometry.is_valid
+    gdf["gross_area_sqft_calc"] = gdf.geometry.area
+    gdf["gross_acres_calc"] = gdf["gross_area_sqft_calc"] / FT2_PER_ACRE
+    gdf["perimeter_ft"] = gdf.geometry.length
+    gdf["shape_compactness"] = np.where(
+        gdf["perimeter_ft"] > 0,
+        4 * math.pi * gdf["gross_area_sqft_calc"] / (gdf["perimeter_ft"] ** 2),
+        np.nan,
+    )
+    gdf["shape_convexity"] = [
+        (geom.area / geom.convex_hull.area) if geom and geom.convex_hull.area else np.nan
+        for geom in gdf.geometry
+    ]
+
+    widths, depths, aspects = [], [], []
+    for geom in gdf.geometry:
+        try:
+            rect = geom.minimum_rotated_rectangle
+            coords = list(rect.exterior.coords)
+            lengths = [math.dist(coords[i], coords[i + 1]) for i in range(4)]
+            short = min(lengths)
+            long = max(lengths)
+            widths.append(short)
+            depths.append(long)
+            aspects.append(long / short if short else np.nan)
+        except Exception:
+            widths.append(np.nan); depths.append(np.nan); aspects.append(np.nan)
+    gdf["min_rotated_width_ft"] = widths
+    gdf["max_rotated_depth_ft"] = depths
+    gdf["shape_aspect_ratio"] = aspects
+    gdf["geometry_acreage_delta_pct"] = (
+        (gdf["gross_acres_calc"] - to_numeric(gdf["acreage_gross_baseline"]))
+        / to_numeric(gdf["acreage_gross_baseline"]).replace(0, np.nan) * 100
+    )
+    return gdf.to_crs(CRS_WGS84)
+
+
+def query_overlay(name: str, url: str, bbox_wgs84: tuple[float, float, float, float], out_fields: str = "*") -> gpd.GeoDataFrame:
+    log = log_start(name, url)
+    try:
+        meta = layer_metadata(url)
+        log.metadata_last_edit = metadata_last_edit(meta)
+        gdf = sanitize_geometry(arcgis_query_bbox(url, bbox_wgs84, out_fields=out_fields))
+        log_finish(log, "success", len(gdf))
+        return gdf
+    except Exception as exc:
+        log_finish(log, "failed", error=exc)
+        return gpd.GeoDataFrame(geometry=[], crs=CRS_WGS84)
+
+
+def discover_prosper_zoning() -> str | None:
+    root = SOURCES["prosper_planning_root"]
+    log = log_start("prosper_zoning_discovery", root)
+    try:
+        payload = get_json(f"{root}/layers", {"f": "json"})
+        candidates = []
+        for lyr in payload.get("layers") or []:
+            name = safe_str(lyr.get("name"))
+            url = f"{root}/{lyr['id']}"
+            try:
+                meta = layer_metadata(url)
+            except Exception:
+                continue
+            if meta.get("geometryType") != "esriGeometryPolygon":
+                continue
+            score = 0
+            lname = name.lower()
+            if "zoning" in lname: score += 20
+            if "district" in lname: score += 5
+            if "future" in lname or "land use" in lname: score -= 10
+            fields = " ".join(f.get("name", "") for f in meta.get("fields") or []).lower()
+            if "zoning" in fields or "zone" in fields: score += 10
+            candidates.append((score, url, name))
+        candidates.sort(reverse=True)
+        if not candidates or candidates[0][0] <= 0:
+            raise RuntimeError("No likely Prosper zoning polygon layer found")
+        score, url, name = candidates[0]
+        log_finish(log, "success", 1, notes=f"selected={name} score={score} url={url}")
+        return url
+    except Exception as exc:
+        log_finish(log, "failed", error=exc)
+        return None
+
+
+def zoning_field(gdf: gpd.GeoDataFrame) -> str | None:
+    return find_field(
+        gdf.columns,
+        exact=["ZONE_", "Zone", "Zoning", "ZONING", "zoning_code", "District", "DISTRICT", "ZONE", "ZONING_CODE"],
+        contains=["zoning", "zone", "district"],
+    )
+
+
+def join_live_zoning(parcels: gpd.GeoDataFrame, bbox_wgs84: tuple[float, float, float, float]) -> gpd.GeoDataFrame:
+    gdf = parcels.copy()
+    gdf["zoning_code_live"] = None
+    gdf["zoning_source_url"] = None
+    gdf["zoning_join_method"] = None
+    configs = {
+        "FRISCO": SOURCES["frisco_zoning"],
+        "MCKINNEY": SOURCES["mckinney_zoning"],
+        "CELINA": SOURCES["celina_zoning"],
+        "PROSPER": discover_prosper_zoning(),
+    }
+    centroids = gdf.to_crs(CRS_DFW_FT).copy()
+    centroids["geometry"] = centroids.geometry.centroid
+    centroids = centroids.to_crs(CRS_WGS84)
+
+    for city, url in configs.items():
+        if not url:
+            continue
+        layer = query_overlay(f"{city.lower()}_zoning", url, bbox_wgs84)
+        if layer.empty:
+            continue
+        field = zoning_field(layer)
+        if not field:
+            LOGS[-1].notes = (LOGS[-1].notes or "") + " | no zoning field detected"
+            continue
+        subset = centroids[centroids["controlling_city"].str.upper() == city][["parcel_sk", "geometry"]]
+        if subset.empty:
+            continue
+        joined = gpd.sjoin(subset, layer[[field, "geometry"]], how="left", predicate="within")
+        mapping = joined.dropna(subset=[field]).drop_duplicates("parcel_sk").set_index("parcel_sk")[field]
+        mask = gdf["parcel_sk"].isin(mapping.index)
+        gdf.loc[mask, "zoning_code_live"] = gdf.loc[mask, "parcel_sk"].map(mapping)
+        gdf.loc[mask, "zoning_source_url"] = url
+        gdf.loc[mask, "zoning_join_method"] = "parcel_centroid_within_live_zoning_polygon"
+    gdf["zoning_code_effective"] = gdf["zoning_code_live"].where(gdf["zoning_code_live"].notna(), gdf["zoning_code_baseline"])
+    return gdf
+
+
+def union_intersection_area(parcel_geom, overlay_geoms) -> float:
+    geoms = [g for g in overlay_geoms if g is not None and not g.is_empty and g.intersects(parcel_geom)]
+    if not geoms:
+        return 0.0
+    try:
+        return unary_union([g.intersection(parcel_geom) for g in geoms]).area
+    except Exception:
+        total = 0.0
+        for g in geoms:
+            try: total += g.intersection(parcel_geom).area
+            except Exception: pass
+        return min(total, parcel_geom.area)
+
+
+def environmental_metrics(parcels: gpd.GeoDataFrame, flood: gpd.GeoDataFrame, wetlands: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    p = parcels.to_crs(CRS_DFW_FT).copy()
+    f = flood.to_crs(CRS_DFW_FT) if not flood.empty else flood
+    w = wetlands.to_crs(CRS_DFW_FT) if not wetlands.empty else wetlands
+    f_sindex = f.sindex if not f.empty else None
+    w_sindex = w.sindex if not w.empty else None
+
+    fld_field = find_field(f.columns, exact=["FLD_ZONE"], contains=["fld_zone", "zone"]) if not f.empty else None
+    wet_field = find_field(w.columns, exact=["WETLAND_TYPE"], contains=["wetland_type", "attribute"]) if not w.empty else None
+
+    any_pct, sfha_pct, flood_zones, wet_pct, wet_types, usable_acres, largest_acres = [], [], [], [], [], [], []
+    for geom in p.geometry:
+        area = geom.area
+        fidx = list(f_sindex.query(geom, predicate="intersects")) if f_sindex is not None else []
+        fsub = f.iloc[fidx] if fidx else f.iloc[0:0]
+        widx = list(w_sindex.query(geom, predicate="intersects")) if w_sindex is not None else []
+        wsub = w.iloc[widx] if widx else w.iloc[0:0]
+
+        farea = union_intersection_area(geom, fsub.geometry)
+        sfha_geoms = []
+        zones = []
+        for _, row in fsub.iterrows():
+            zone = safe_str(row.get(fld_field)) if fld_field else ""
+            if zone: zones.append(zone)
+            if zone.upper().startswith(("A", "V")):
+                sfha_geoms.append(row.geometry)
+        sfha_area = union_intersection_area(geom, sfha_geoms)
+        warea = union_intersection_area(geom, wsub.geometry)
