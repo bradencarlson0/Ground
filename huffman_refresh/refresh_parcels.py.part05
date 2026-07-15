@@ -1,0 +1,134 @@
+    r = r[r.geometry.geom_type.isin(["LineString", "MultiLineString"])].copy()
+    road_name_field = find_field(r.columns, exact=["RTE_NM", "ROUTE", "STREET_NM", "ROAD_NAME", "NAME"], contains=["rte_nm", "route", "road", "street", "name"])
+    class_field = find_field(r.columns, exact=["FUNC_CLASS", "FUNCTIONAL_CLASS", "F_SYSTEM"], contains=["func", "functional", "f_system"])
+    road_aadt_field = find_field(r.columns, exact=["AADT"], contains=["aadt"])
+    road_year_field = find_field(r.columns, exact=["AADT_YEAR", "YEAR"], contains=["aadt_year", "count_year", "year"])
+    rsidx = r.sindex
+
+    a = aadt.to_crs(CRS_DFW_FT).copy() if not aadt.empty else aadt
+    aadt_field = find_field(a.columns, exact=["AADT"], contains=["aadt", "traffic_volume", "volume"]) if not a.empty else None
+    aadt_year_field = find_field(a.columns, exact=["AADT_YEAR", "YEAR"], contains=["aadt_year", "count_year", "year"]) if not a.empty else None
+    asidx = a.sindex if not a.empty else None
+
+    road_names, classes, frontages, corners, aadts, years, dists, methods = [], [], [], [], [], [], [], []
+    for _, prow in p.iterrows():
+        geom = prow.geometry
+        search_geom = geom.buffer(200)
+        idx = list(rsidx.query(search_geom, predicate="intersects"))
+        sub = r.iloc[idx].copy() if idx else r.iloc[0:0]
+        candidates = []
+        for ridx, rr in sub.iterrows():
+            dist = geom.distance(rr.geometry)
+            # Centerline buffer frontage proxy. It is deliberately labeled a proxy.
+            try:
+                frontage = geom.boundary.intersection(rr.geometry.buffer(100)).length
+            except Exception:
+                frontage = 0.0
+            name = safe_str(rr.get(road_name_field)) if road_name_field else ""
+            cls = safe_str(rr.get(class_field)) if class_field else ""
+            candidates.append((frontage, -dist, ridx, name, cls, rr))
+        candidates.sort(reverse=True, key=lambda x: (x[0], x[1]))
+        if candidates:
+            best = candidates[0]
+            frontage = best[0]
+            rr = best[5]
+            road_names.append(best[3] or safe_str(prow.get("frontage_road_baseline")))
+            classes.append(best[4])
+            frontages.append(frontage)
+            significant = [c for c in candidates if c[0] >= 40]
+            corners.append(len({c[3] for c in significant if c[3]}) >= 2 or len(significant) >= 2)
+            if road_aadt_field:
+                aadts.append(pd.to_numeric(pd.Series([rr.get(road_aadt_field)]), errors="coerce").iloc[0])
+                years.append(safe_str(rr.get(road_year_field)) if road_year_field else "")
+                dists.append(geom.distance(rr.geometry))
+                methods.append("live_txdot_road_segment")
+            elif asidx is not None and aadt_field:
+                nearest_idx = list(asidx.nearest(geom.centroid, return_all=False, max_distance=5280))
+                # geopandas spatial index may return a 2xN array.
+                if len(nearest_idx):
+                    arr = np.asarray(nearest_idx)
+                    ai = int(arr[-1][0] if arr.ndim > 1 else arr[0])
+                    ar = a.iloc[ai]
+                    aadts.append(pd.to_numeric(pd.Series([ar.get(aadt_field)]), errors="coerce").iloc[0])
+                    years.append(safe_str(ar.get(aadt_year_field)) if aadt_year_field else "")
+                    dists.append(geom.distance(ar.geometry))
+                    methods.append("live_txdot_nearest_aadt_feature")
+                else:
+                    aadts.append(pd.to_numeric(pd.Series([prow.get("aadt_primary_frontage_baseline")]), errors="coerce").iloc[0])
+                    years.append(""); dists.append(np.nan); methods.append("baseline_aadt_fallback")
+            else:
+                aadts.append(pd.to_numeric(pd.Series([prow.get("aadt_primary_frontage_baseline")]), errors="coerce").iloc[0])
+                years.append(""); dists.append(np.nan); methods.append("baseline_aadt_fallback")
+        else:
+            road_names.append(safe_str(prow.get("frontage_road_baseline")))
+            classes.append("")
+            frontages.append(np.nan)
+            corners.append(False)
+            aadts.append(pd.to_numeric(pd.Series([prow.get("aadt_primary_frontage_baseline")]), errors="coerce").iloc[0])
+            years.append(""); dists.append(np.nan); methods.append("baseline_fallback_no_adjacent_txdot_segment")
+
+    p["primary_road_live"] = road_names
+    p["road_functional_class_live"] = classes
+    p["frontage_proxy_ft"] = frontages
+    p["corner_proxy_flag"] = corners
+    p["aadt_live"] = aadts
+    p["aadt_year_live"] = years
+    p["aadt_distance_ft"] = dists
+    p["road_source_method"] = methods
+    return p.to_crs(CRS_WGS84)
+
+
+def hospital_metrics(parcels: gpd.GeoDataFrame, hospitals: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    p = parcels.to_crs(CRS_DFW_FT).copy()
+    p["nearest_hospital_live"] = None
+    p["nearest_hospital_type_live"] = None
+    p["hospital_distance_mi_live"] = np.nan
+    p["hospital_source_method"] = None
+    if hospitals.empty:
+        p["nearest_hospital_live"] = p["nearest_hospital_baseline"]
+        p["hospital_source_method"] = "baseline_name_only_no_live_hospital_layer"
+        return p.to_crs(CRS_WGS84)
+    h = hospitals.to_crs(CRS_DFW_FT).copy()
+    name_field = find_field(h.columns, exact=["NAME", "FACILITY", "HOSPITAL_NAME"], contains=["name", "facility"])
+    type_field = find_field(h.columns, exact=["TYPE", "HOSPITAL_TYPE"], contains=["type"])
+    left = p[["parcel_sk", "geometry"]].copy()
+    left["geometry"] = left.geometry.centroid
+    cols = [x for x in [name_field, type_field] if x] + ["geometry"]
+    j = gpd.sjoin_nearest(left, h[cols], how="left", distance_col="_hospital_dist_ft")
+    j = j.sort_values("_hospital_dist_ft").drop_duplicates("parcel_sk").set_index("parcel_sk")
+    if name_field:
+        p["nearest_hospital_live"] = p["parcel_sk"].map(j[name_field])
+    if type_field:
+        p["nearest_hospital_type_live"] = p["parcel_sk"].map(j[type_field])
+    p["hospital_distance_mi_live"] = p["parcel_sk"].map(j["_hospital_dist_ft"]) / 5280.0
+    p["hospital_source_method"] = "live_hifld_nearest_hospital"
+    return p.to_crs(CRS_WGS84)
+
+
+def conventional_zoning_status(city: str, code: str) -> tuple[str, float]:
+    city = safe_str(city).upper()
+    tokens = {t.strip().upper() for t in re.split(r"[/,;| ]+", safe_str(code)) if t.strip()}
+    favorable = {
+        "FRISCO": {"O-1", "O-2", "R", "OTC", "H", "C-1", "C-2", "IT", "I"},
+        "PROSPER": {"O", "DTO", "NS", "DTR", "R", "DTC", "C", "CC", "I", "COR", "BP"},
+        "CELINA": {"CF", "C", "MU", "MU-1", "MU-2", "PRO", "CCO", "I", "I-1", "I-2", "C-1", "C-2", "B-2", "B-3"},
+        "MCKINNEY": {"C1", "C2", "C3", "O1", "O2", "I1", "I2", "C", "O", "I", "BN"},
+    }
+    if tokens & favorable.get(city, set()):
+        return "BASE_BY_RIGHT_OR_STRONG_PATH", 0.90
+    residential_markers = {"SF", "SF-5", "SF-7", "SF-8.5", "SF-10", "SF-15", "RE", "AG", "PH", "TH", "MF", "MF-15", "MF-19"}
+    if tokens and all(any(t == r or t.startswith(r + "-") for r in residential_markers) for t in tokens):
+        return "BASE_RESIDENTIAL_NO_SIGNAL", 0.80
+    return "BASE_USE_CROSSWALK_REVIEW", 0.55
+
+
+def classify_vacancy(row: pd.Series) -> tuple[str, float]:
+    coverage = pd.to_numeric(pd.Series([row.get("ms_building_coverage_pct")]), errors="coerce").iloc[0]
+    imp = pd.to_numeric(pd.Series([row.get("improvement_value_live")]), errors="coerce").iloc[0]
+    imp_sf = pd.to_numeric(pd.Series([row.get("improvement_sqft_live")]), errors="coerce").iloc[0]
+    count = pd.to_numeric(pd.Series([row.get("ms_building_count")]), errors="coerce").fillna(0).iloc[0]
+    coverage = 0.0 if pd.isna(coverage) else float(coverage)
+    imp = 0.0 if pd.isna(imp) else float(imp)
+    imp_sf = 0.0 if pd.isna(imp_sf) else float(imp_sf)
+    if count == 0 and imp <= 2500 and imp_sf <= 500:
+        return "RAW_VACANT_CONFIRMED", 0.95
