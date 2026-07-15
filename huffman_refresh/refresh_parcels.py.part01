@@ -1,0 +1,185 @@
+            return gpd.GeoDataFrame(geometry=[], crs=CRS_WGS84)
+    except Exception:
+        pass
+
+    # Fallback to resultOffset pagination.
+    meta = layer_metadata(layer_url)
+    page_size = min(int(meta.get("maxRecordCount") or 1000), 2000)
+    offset = 0
+    parts: list[gpd.GeoDataFrame] = []
+    while True:
+        payload = get_json(
+            f"{layer_url}/query",
+            {
+                **common,
+                "f": "geojson",
+                "outFields": out_fields,
+                "returnGeometry": "true",
+                "outSR": 4326,
+                "resultOffset": offset,
+                "resultRecordCount": page_size,
+            },
+            method="POST",
+        )
+        part = features_to_gdf(payload)
+        if part.empty:
+            break
+        parts.append(part)
+        if len(part) < page_size:
+            break
+        offset += page_size
+    if not parts:
+        return gpd.GeoDataFrame(geometry=[], crs=CRS_WGS84)
+    return pd.concat(parts, ignore_index=True).set_crs(CRS_WGS84)
+
+
+def field_map(meta: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {str(f.get("name", "")).lower(): f for f in meta.get("fields") or []}
+
+
+def find_field(columns: Iterable[str], exact: Sequence[str] = (), contains: Sequence[str] = ()) -> str | None:
+    cols = list(columns)
+    by_lower = {str(c).lower(): str(c) for c in cols}
+    for name in exact:
+        if name.lower() in by_lower:
+            return by_lower[name.lower()]
+    for token in contains:
+        token = token.lower()
+        for c in cols:
+            if token in str(c).lower():
+                return str(c)
+    return None
+
+
+def normalize_bool(value: Any) -> bool:
+    return str(value).strip().lower() in {"true", "yes", "1", "y"}
+
+
+def sanitize_geometry(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    if gdf.empty:
+        return gdf
+    gdf = gdf.copy()
+    gdf["geometry"] = gdf.geometry.apply(lambda g: make_valid(g) if g is not None and not g.is_valid else g)
+    gdf = gdf[gdf.geometry.notna() & ~gdf.geometry.is_empty].copy()
+    return gdf
+
+
+def to_numeric(series: pd.Series) -> pd.Series:
+    return pd.to_numeric(series, errors="coerce")
+
+
+def safe_str(value: Any) -> str:
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        return ""
+    return str(value).strip()
+
+
+def batch_where_values(field: str, values: Sequence[str], field_type: str | None) -> list[str]:
+    numeric_types = {"esriFieldTypeInteger", "esriFieldTypeSmallInteger", "esriFieldTypeDouble", "esriFieldTypeSingle", "esriFieldTypeOID"}
+    out = []
+    for start in range(0, len(values), 75):
+        chunk = values[start:start + 75]
+        if field_type in numeric_types:
+            vals = ",".join(str(int(float(v))) for v in chunk)
+        else:
+            vals = ",".join("'" + str(v).replace("'", "''") + "'" for v in chunk)
+        out.append(f"{field} IN ({vals})")
+    return out
+
+
+def pull_candidate_parcels(manifest: pd.DataFrame) -> gpd.GeoDataFrame:
+    parts: list[gpd.GeoDataFrame] = []
+    configs = [
+        ("COLLIN", SOURCES["collin_parcels"], ["propID", "PROP_ID"]),
+        ("DENTON", SOURCES["denton_parcels"], ["pid", "PID"]),
+    ]
+    for county, url, id_candidates in configs:
+        log = log_start(f"{county.lower()}_parcels", url)
+        try:
+            meta = layer_metadata(url)
+            log.metadata_last_edit = metadata_last_edit(meta)
+            fmap = field_map(meta)
+            id_field = next((f for f in id_candidates if f.lower() in fmap), None)
+            if not id_field:
+                raise RuntimeError(f"No parcel ID field found in {url}")
+            field_type = fmap[id_field.lower()].get("type")
+            ids = manifest.loc[manifest["source_county"] == county, "source_parcel_id"].astype(str).tolist()
+            county_parts = []
+            for where in batch_where_values(id_field, ids, field_type):
+                part = arcgis_query_where(url, where)
+                if not part.empty:
+                    county_parts.append(part)
+            if not county_parts:
+                raise RuntimeError(f"No {county} parcels returned")
+            gdf = pd.concat(county_parts, ignore_index=True).set_crs(CRS_WGS84)
+            gdf = sanitize_geometry(gdf)
+            gdf["source_county"] = county
+            gdf["source_parcel_id"] = gdf[id_field].astype(str).str.replace(r"\.0$", "", regex=True)
+            gdf["parcel_sk"] = county + "_" + gdf["source_parcel_id"]
+            parts.append(gdf)
+            log_finish(log, "success", len(gdf), notes=f"ID field={id_field}; source CRS={meta.get('extent', {}).get('spatialReference')}")
+        except Exception as exc:
+            log_finish(log, "failed", error=exc)
+            raise
+    all_parcels = pd.concat(parts, ignore_index=True).set_crs(CRS_WGS84)
+    all_parcels = all_parcels.drop_duplicates("parcel_sk", keep="first")
+    return all_parcels
+
+
+def standardize_parcel_attributes(parcels: gpd.GeoDataFrame, manifest: pd.DataFrame) -> gpd.GeoDataFrame:
+    gdf = parcels.copy()
+    manifest2 = manifest.copy()
+    manifest2["parcel_sk"] = manifest2["parcel_sk"].astype(str)
+    gdf = gdf.merge(manifest2, on=["parcel_sk", "source_county", "source_parcel_id"], how="right", suffixes=("", "_manifest"))
+    if gdf.geometry.isna().any():
+        missing = gdf.loc[gdf.geometry.isna(), "parcel_sk"].tolist()
+        raise RuntimeError(f"Missing live parcel geometry for {len(missing)} candidates: {missing[:20]}")
+    gdf = gpd.GeoDataFrame(gdf, geometry="geometry", crs=CRS_WGS84)
+
+    collin = gdf["source_county"] == "COLLIN"
+    denton = gdf["source_county"] == "DENTON"
+
+    def coalesce_column(target: str, county_mask: pd.Series, candidates: Sequence[str]) -> None:
+        col = find_field(gdf.columns, exact=candidates)
+        if col:
+            gdf.loc[county_mask, target] = gdf.loc[county_mask, col]
+
+    # Collin fields.
+    for target, candidates in {
+        "owner_name_live": ["ownerName", "OWNERNAME"],
+        "situs_address_live": ["situsConcat", "SITUSCONCAT"],
+        "legal_description_live": ["legalDescription", "LEGALDESCRIPTION"],
+        "market_value_live": ["currValMarket", "CURRVALMARKET"],
+        "land_value_live": ["currValLand", "CURRVALLAND"],
+        "improvement_value_live": ["currValImprv", "CURRVALIMPRV"],
+        "improvement_sqft_live": ["imprvMainArea", "IMPRVMAINAREA"],
+        "year_built_live": ["imprvYearBuilt", "IMPRVYEARBUILT"],
+        "cad_acres_live": ["landSizeAcres", "LANDSIZEACRES"],
+        "cad_land_sqft_live": ["landSizeSqft", "LANDSIZESQFT"],
+        "cad_use_code_live": ["propUseCode", "PROPUSECODE"],
+        "cad_property_type_live": ["propType", "PROPTYPE"],
+        "homestead_flag_live": ["exemptHmstdFlag", "EXEMPTHMSTDFLAG"],
+        "cad_data_date": ["dataDate", "DATADATE"],
+    }.items():
+        coalesce_column(target, collin, candidates)
+
+    # Denton fields.
+    for target, candidates in {
+        "owner_name_live": ["name", "ownername"],
+        "situs_address_live": ["situs", "situsaddress", "situsfulladdress"],
+        "legal_description_live": ["legaldescription"],
+        "market_value_live": ["ownerMarketValue", "marketvalue", "totalvalue"],
+        "land_value_live": ["landvalue"],
+        "improvement_value_live": ["improvementvalue", "imprvalue", "improvementmarketvalue"],
+        "improvement_sqft_live": ["improvementarea", "improvementsqft", "buildingarea"],
+        "year_built_live": ["yearbuilt"],
+        "cad_acres_live": ["legalacreage", "effectivesizeacres"],
+        "cad_land_sqft_live": ["land_sqft", "landsqft"],
+        "cad_use_code_live": ["usecd", "usecode"],
+        "cad_property_type_live": ["proptype", "propertytype"],
+        "homestead_flag_live": ["homestead", "homesteadflag"],
+        "cad_zoning_live": ["cad_zoning", "zoning"],
+    }.items():
+        coalesce_column(target, denton, candidates)
+
+    for numeric in [
