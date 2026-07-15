@@ -1,0 +1,142 @@
+            total = sum(x[0] for x in entries)
+            ccn = "|".join(dict.fromkeys(safe_str(x[1].get(ccn_field)) for x in entries if safe_str(x[1].get(ccn_field)))) if ccn_field else ""
+            util = "|".join(dict.fromkeys(safe_str(x[1].get(utility_field)) for x in entries if safe_str(x[1].get(utility_field)))) if utility_field else ""
+            dba = "|".join(dict.fromkeys(safe_str(x[1].get(dba_field)) for x in entries if safe_str(x[1].get(dba_field)))) if dba_field else ""
+            status = "|".join(dict.fromkeys(safe_str(x[1].get(status_field)) for x in entries if safe_str(x[1].get(status_field)))) if status_field else ""
+            overlap = 100 * total / geom.area if geom.area else np.nan
+            values.append((ccn, util, dba, status, min(overlap, 100.0)))
+        else:
+            values.append(("", "", "", "", 0.0))
+    for col, pos in [(f"{prefix}_ccn_no",0),(f"{prefix}_utility",1),(f"{prefix}_dba",2),(f"{prefix}_ccn_status",3),(f"{prefix}_ccn_overlap_pct",4)]:
+        p[col] = [x[pos] for x in values]
+    return p
+
+
+def nearest_line_metrics(parcels: gpd.GeoDataFrame, lines: gpd.GeoDataFrame, prefix: str) -> gpd.GeoDataFrame:
+    p = parcels.to_crs(CRS_DFW_FT).copy()
+    p[f"{prefix}_facility_line_distance_ft"] = np.nan
+    p[f"{prefix}_facility_line_name"] = None
+    if lines.empty:
+        return p.to_crs(CRS_WGS84)
+    l = lines.to_crs(CRS_DFW_FT)
+    name_field = find_field(l.columns, exact=["UTILITY", "NAME", "SYSTEM"], contains=["utility", "name", "system"])
+    # sjoin_nearest is efficient and returns one nearest feature per parcel.
+    left = p[["parcel_sk", "geometry"]].copy()
+    nearest = gpd.sjoin_nearest(left, l[[name_field, "geometry"]] if name_field else l[["geometry"]], how="left", distance_col="_dist")
+    nearest = nearest.sort_values("_dist").drop_duplicates("parcel_sk").set_index("parcel_sk")
+    p[f"{prefix}_facility_line_distance_ft"] = p["parcel_sk"].map(nearest["_dist"])
+    if name_field:
+        p[f"{prefix}_facility_line_name"] = p["parcel_sk"].map(nearest[name_field])
+    return p.to_crs(CRS_WGS84)
+
+
+def tceq_district_metrics(parcels: gpd.GeoDataFrame, districts: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    p = parcels.copy()
+    p["tceq_district_names"] = None
+    p["tceq_district_types"] = None
+    if districts.empty:
+        return p
+    d = districts.to_crs(CRS_WGS84)
+    cent = p.to_crs(CRS_DFW_FT).copy(); cent["geometry"] = cent.geometry.centroid; cent = cent.to_crs(CRS_WGS84)
+    name_field = find_field(d.columns, exact=["DISTRICT_NAME", "NAME"], contains=["district_name", "name"])
+    type_field = find_field(d.columns, exact=["DISTRICT_TYPE", "TYPE"], contains=["district_type", "type"])
+    cols = [x for x in [name_field, type_field] if x] + ["geometry"]
+    j = gpd.sjoin(cent[["parcel_sk", "geometry"]], d[cols], how="left", predicate="within")
+    if name_field:
+        m = j.groupby("parcel_sk")[name_field].apply(lambda x: "|".join(dict.fromkeys(safe_str(v) for v in x if safe_str(v))))
+        p["tceq_district_names"] = p["parcel_sk"].map(m)
+    if type_field:
+        m = j.groupby("parcel_sk")[type_field].apply(lambda x: "|".join(dict.fromkeys(safe_str(v) for v in x if safe_str(v))))
+        p["tceq_district_types"] = p["parcel_sk"].map(m)
+    return p
+
+
+def discover_txdot_layers() -> tuple[str | None, str | None, list[dict[str, Any]]]:
+    log = log_start("txdot_arcgis_discovery", SOURCES["arcgis_search"])
+    found_items: dict[str, dict[str, Any]] = {}
+    queries = [
+        'TxDOT AADT type:"Feature Service"',
+        '"Annual Average Daily Traffic" Texas type:"Feature Service"',
+        'TxDOT "Roadway Inventory" type:"Feature Service"',
+        'Texas roadway inventory AADT type:"Feature Service"',
+        'TxDOT traffic counts type:"Feature Service"',
+    ]
+    try:
+        for q in queries:
+            payload = get_json(SOURCES["arcgis_search"], {"f": "json", "q": q, "num": 100, "sortField": "modified", "sortOrder": "desc"})
+            for item in payload.get("results") or []:
+                if item.get("url"):
+                    found_items[item["id"]] = item
+        candidates = []
+        road_choice = None
+        aadt_choice = None
+        road_score_best = -999
+        aadt_score_best = -999
+        for item in found_items.values():
+            title = safe_str(item.get("title"))
+            owner = safe_str(item.get("owner"))
+            official = "txdot" in (title + " " + owner).lower() or "texas department of transportation" in (title + " " + owner).lower()
+            if not official:
+                continue
+            service_url = item.get("url")
+            try:
+                service_meta = get_json(service_url, {"f": "json"})
+            except Exception:
+                continue
+            layers = service_meta.get("layers") or []
+            if not layers and service_meta.get("geometryType"):
+                layers = [{"id": "", "name": title}]
+            for lyr in layers:
+                layer_url = service_url.rstrip("/") + (f"/{lyr['id']}" if str(lyr.get("id", "")) != "" else "")
+                try:
+                    meta = layer_metadata(layer_url)
+                except Exception:
+                    continue
+                geom_type = meta.get("geometryType")
+                field_names = [f.get("name", "") for f in meta.get("fields") or []]
+                lower_fields = " ".join(field_names).lower()
+                lname = safe_str(meta.get("name") or lyr.get("name"))
+                text = (title + " " + lname).lower()
+                aadt_score = 0
+                road_score = 0
+                if "aadt" in lower_fields: aadt_score += 30
+                if "traffic" in text or "aadt" in text or "volume" in text: aadt_score += 15
+                if geom_type in {"esriGeometryPoint", "esriGeometryPolyline"}: aadt_score += 5
+                if geom_type == "esriGeometryPolyline": road_score += 15
+                if "roadway inventory" in text or "roadbed" in text or "roadway" in text: road_score += 20
+                if any(t in lower_fields for t in ["rte_nm", "route", "road", "street", "rdbd"]): road_score += 10
+                if "aadt" in lower_fields: road_score += 10
+                rec = {"title": title, "owner": owner, "layer_name": lname, "url": layer_url, "geometry_type": geom_type, "fields": field_names, "aadt_score": aadt_score, "road_score": road_score}
+                candidates.append(rec)
+                if aadt_score > aadt_score_best:
+                    aadt_score_best = aadt_score; aadt_choice = layer_url
+                if road_score > road_score_best:
+                    road_score_best = road_score; road_choice = layer_url
+        (RAW / "txdot_discovery_candidates.json").write_text(json.dumps(candidates, indent=2), encoding="utf-8")
+        if aadt_score_best < 20: aadt_choice = None
+        if road_score_best < 20: road_choice = None
+        log_finish(log, "success" if (road_choice or aadt_choice) else "partial", len(candidates), notes=f"road={road_choice}; aadt={aadt_choice}")
+        return road_choice, aadt_choice, candidates
+    except Exception as exc:
+        log_finish(log, "failed", error=exc)
+        return None, None, []
+
+
+def road_metrics(parcels: gpd.GeoDataFrame, roads: gpd.GeoDataFrame, aadt: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    p = parcels.to_crs(CRS_DFW_FT).copy()
+    p["primary_road_live"] = None
+    p["road_functional_class_live"] = None
+    p["frontage_proxy_ft"] = np.nan
+    p["corner_proxy_flag"] = False
+    p["aadt_live"] = np.nan
+    p["aadt_year_live"] = None
+    p["aadt_distance_ft"] = np.nan
+    p["road_source_method"] = None
+
+    if roads.empty:
+        p["aadt_live"] = to_numeric(p["aadt_primary_frontage_baseline"])
+        p["primary_road_live"] = p["frontage_road_baseline"]
+        p["road_source_method"] = "baseline_fallback_no_live_txdot_road_layer"
+        return p.to_crs(CRS_WGS84)
+
+    r = roads.to_crs(CRS_DFW_FT).copy()
