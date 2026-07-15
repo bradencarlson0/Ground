@@ -1,0 +1,150 @@
+    if count == 0 and (imp > 2500 or imp_sf > 500):
+        return "DATA_CONFLICT_CAD_IMPROVEMENT_NO_FOOTPRINT", 0.55
+    if coverage <= 2.0:
+        return "LIGHTLY_IMPROVED_OR_EXCESS_LAND", 0.80
+    if coverage <= 8.0:
+        return "EXCESS_LAND_OR_REDEVELOPMENT_REVIEW", 0.65
+    if coverage <= 20.0:
+        return "REDEVELOPMENT_CANDIDATE", 0.60
+    return "BUILT_OUT_OR_HIGH_COVERAGE", 0.80
+
+
+def score_and_gate(parcels: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    p = parcels.copy()
+    # Zoning status.
+    zoning_status, zoning_conf = [], []
+    for _, row in p.iterrows():
+        bucket = safe_str(row.get("medical_prepass_bucket"))
+        if bucket and bucket != "CONVENTIONAL":
+            if bucket == "ADVANCE":
+                status = "PD_ADVANCE_" + (safe_str(row.get("pd_final_status")) or "POSITIVE")
+            elif bucket == "DEPRIORITIZE":
+                status = "PD_DEPRIORITIZE_" + (safe_str(row.get("pd_final_status")) or "NO_SIGNAL")
+            else:
+                status = "PD_MANUAL_EXCEPTION_" + (safe_str(row.get("pd_final_status")) or "REVIEW")
+            conf = pd.to_numeric(pd.Series([row.get("pd_confidence")]), errors="coerce").iloc[0]
+            if pd.isna(conf): conf = 0.55
+        else:
+            status, conf = conventional_zoning_status(row.get("controlling_city"), row.get("zoning_code_effective"))
+        zoning_status.append(status); zoning_conf.append(float(conf))
+    p["medical_zoning_status"] = zoning_status
+    p["zoning_confidence"] = zoning_conf
+
+    vac = p.apply(classify_vacancy, axis=1)
+    p["vacancy_class_live"] = [x[0] for x in vac]
+    p["vacancy_confidence"] = [x[1] for x in vac]
+
+    # Utility status.
+    water_known = p["water_utility"].fillna("").astype(str).str.len() > 0
+    sewer_known = p["sewer_utility"].fillna("").astype(str).str.len() > 0
+    p["utility_territory_status"] = np.select(
+        [water_known & sewer_known, water_known | sewer_known],
+        ["BOTH_TERRITORIES_IDENTIFIED", "ONE_TERRITORY_IDENTIFIED"],
+        default="UTILITY_TERRITORY_UNKNOWN",
+    )
+    p["water_line_nearby_500ft"] = to_numeric(p["water_facility_line_distance_ft"]) <= 500
+    p["sewer_line_nearby_500ft"] = to_numeric(p["sewer_facility_line_distance_ft"]) <= 500
+
+    # Geometry scores.
+    acres = to_numeric(p["gross_acres_calc"])
+    compact = to_numeric(p["shape_compactness"]).clip(0, 1)
+    width = to_numeric(p["min_rotated_width_ft"])
+    aspect = to_numeric(p["shape_aspect_ratio"])
+    size_score = np.where((acres >= 2) & (acres <= 5), 100, np.where((acres >= 1.25) & (acres < 2), 65, 15))
+    width_score = np.select([width >= 250, width >= 180, width >= 120], [100, 80, 55], default=20)
+    aspect_score = np.select([aspect <= 2.5, aspect <= 4.0, aspect <= 6.0], [100, 75, 45], default=20)
+    compact_score = compact.fillna(0.3) * 100
+    p["geometry_score"] = 0.35 * size_score + 0.30 * width_score + 0.20 * aspect_score + 0.15 * compact_score
+
+    # Environmental score.
+    sfha = to_numeric(p["flood_sfha_pct_live"]).fillna(to_numeric(p["floodplain_pct_baseline"])).fillna(0)
+    wet = to_numeric(p["wetlands_pct_live"]).fillna(to_numeric(p["wetlands_pct_baseline"])).fillna(0)
+    largest = to_numeric(p["largest_contiguous_unconstrained_acres"]).fillna(acres)
+    burden = sfha + wet
+    p["environmental_score"] = np.clip(100 - burden * 1.5, 0, 100) * 0.65 + np.clip(largest / 2.5 * 100, 0, 100) * 0.35
+
+    # Vacancy score.
+    vacancy_scores = {
+        "RAW_VACANT_CONFIRMED": 100,
+        "LIGHTLY_IMPROVED_OR_EXCESS_LAND": 85,
+        "EXCESS_LAND_OR_REDEVELOPMENT_REVIEW": 65,
+        "REDEVELOPMENT_CANDIDATE": 45,
+        "DATA_CONFLICT_CAD_IMPROVEMENT_NO_FOOTPRINT": 50,
+        "BUILT_OUT_OR_HIGH_COVERAGE": 10,
+    }
+    p["vacancy_score"] = p["vacancy_class_live"].map(vacancy_scores).fillna(40)
+
+    # Access score; frontage is explicitly a proxy.
+    frontage = to_numeric(p["frontage_proxy_ft"])
+    aadt = to_numeric(p["aadt_live"]).fillna(to_numeric(p["aadt_primary_frontage_baseline"])).fillna(0)
+    frontage_score = np.select([frontage >= 250, frontage >= 180, frontage >= 120, frontage.notna()], [100, 80, 55, 20], default=35)
+    aadt_score = np.select([aadt >= 30000, aadt >= 15000, aadt >= 7500, aadt > 0], [100, 80, 60, 35], default=20)
+    corner_score = np.where(p["corner_proxy_flag"].fillna(False), 100, 55)
+    p["access_score"] = 0.50 * frontage_score + 0.35 * aadt_score + 0.15 * corner_score
+
+    # Utility score.
+    base_utility = p["utility_territory_status"].map({
+        "BOTH_TERRITORIES_IDENTIFIED": 80,
+        "ONE_TERRITORY_IDENTIFIED": 50,
+        "UTILITY_TERRITORY_UNKNOWN": 20,
+    }).fillna(20)
+    line_bonus = p["water_line_nearby_500ft"].fillna(False).astype(int) * 10 + p["sewer_line_nearby_500ft"].fillna(False).astype(int) * 10
+    p["utility_score"] = np.clip(base_utility + line_bonus, 0, 100)
+
+    p["physical_feasibility_score"] = (
+        0.25 * p["geometry_score"] +
+        0.20 * p["environmental_score"] +
+        0.20 * p["vacancy_score"] +
+        0.20 * p["access_score"] +
+        0.15 * p["utility_score"]
+    )
+    baseline = to_numeric(p["score_baseline"])
+    baseline_pct = np.where(baseline <= 1.5, baseline * 100, baseline)
+    p["risk_adjusted_screening_score"] = (
+        0.60 * p["physical_feasibility_score"] +
+        0.30 * pd.Series(baseline_pct, index=p.index).fillna(50) +
+        0.10 * p["zoning_confidence"] * 100
+    )
+
+    # Gates.
+    gate_status, reasons = [], []
+    for _, row in p.iterrows():
+        fatal, hold = [], []
+        acres_i = float(row.get("gross_acres_calc") or 0)
+        if acres_i < 1.25 or acres_i > 5.0: fatal.append("outside 1.25–5 acre screen")
+        elif acres_i < 2.0: hold.append("1.25–2 acre watchlist")
+        zstat = safe_str(row.get("medical_zoning_status"))
+        if "DEPRIORITIZE" in zstat or "RESIDENTIAL_NO_SIGNAL" in zstat: fatal.append("medical zoning screen negative")
+        if "MANUAL_EXCEPTION" in zstat or "REVIEW" in zstat: hold.append("zoning/PD exception")
+        if safe_str(row.get("vacancy_class_live")) == "BUILT_OUT_OR_HIGH_COVERAGE": fatal.append("built out/high building coverage")
+        if safe_str(row.get("vacancy_class_live")) == "DATA_CONFLICT_CAD_IMPROVEMENT_NO_FOOTPRINT": hold.append("CAD/footprint conflict")
+        burden_i = float((row.get("flood_sfha_pct_live") or 0) + (row.get("wetlands_pct_live") or 0))
+        if burden_i >= 50: fatal.append("SFHA + wetlands >= 50%")
+        largest_i = row.get("largest_contiguous_unconstrained_acres")
+        if pd.notna(largest_i) and acres_i >= 2 and float(largest_i) < 1.75: fatal.append("largest unconstrained area < 1.75 acres")
+        front_i = row.get("frontage_proxy_ft")
+        if pd.notna(front_i) and float(front_i) < 120: hold.append("frontage proxy < 120 ft")
+        if safe_str(row.get("utility_territory_status")) == "UTILITY_TERRITORY_UNKNOWN": hold.append("water/sewer territory unknown")
+        hosp = row.get("hospital_distance_mi_live")
+        if pd.notna(hosp) and float(hosp) > 1.5: hold.append("hospital distance > 1.5 miles")
+        if fatal:
+            gate_status.append("FAIL")
+            reasons.append("; ".join(fatal + hold))
+        elif hold:
+            gate_status.append("CONDITIONAL")
+            reasons.append("; ".join(hold))
+        else:
+            gate_status.append("ADVANCE")
+            reasons.append("No preliminary fatal or hold flag")
+    p["physical_gate_status"] = gate_status
+    p["gate_reasons"] = reasons
+    p["score_version"] = VERSION
+    p["refresh_timestamp_utc"] = RUN_AT
+    p["rank_overall"] = p["risk_adjusted_screening_score"].rank(method="min", ascending=False).astype(int)
+    p["rank_within_city"] = p.groupby("controlling_city")["risk_adjusted_screening_score"].rank(method="min", ascending=False).astype(int)
+    return p
+
+
+def write_gdf(gdf: gpd.GeoDataFrame, path: Path, driver: str | None = None) -> None:
+    out = gdf.copy()
+    # Convert unsupported object/list/dict columns to JSON-ish strings.
